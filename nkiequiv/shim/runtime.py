@@ -328,6 +328,10 @@ class NkiTensor:
         values = c.domain.store_cast(values, self.dtype)
         if hasattr(values, "shape") and values.shape != self._idx.shape:
             values = np.broadcast_to(values, self._idx.shape)
+        if isinstance(values, np.ndarray) and values.ndim == 0:
+            # A 0-d view (e.g. out[c, h, w]): assigning a 0-d object array into one cell would
+            # store the array itself, not its element.
+            values = values[()]
         if c.track_deps and c.loop_stack:
             _check_deps(self, c, "write", accumulate)
         self._storage.vals[self._idx] = values

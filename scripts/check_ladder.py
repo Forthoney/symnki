@@ -21,7 +21,8 @@ from nkiequiv.numpy_ref import NumpyRef  # noqa: E402
 
 def check_candidate(level, file, fn, cases=None):
     """Accepted only if every harness case is EQUIVALENT with passing numerics.
-    Returns (accepted, [(case label, verdict, numerics ok, reason)])."""
+    Returns (accepted, [(case label, verdict, numerics ok, reason, case accepted, report)]),
+    where report is the full nkiequiv Report (counterexample, numerics runs, stats)."""
     spec = LEVELS[level]
     ref_path = os.path.join(LADDER_DIR, "refs.py")
     rows = []
@@ -38,8 +39,33 @@ def check_candidate(level, file, fn, cases=None):
             reason = (f"numerics FAIL: cand rel err {rep.numerics.get('cand_max_rel_err', float('nan')):.3g} "
                       f"> limit {rep.numerics.get('limit', float('nan')):.3g}"
                       + (f" on inputs {bad[0]['inputs']}" if bad else ""))
-        rows.append((case.label, rep.verdict, num_ok, reason, rep.accept))
+        rows.append((case.label, rep.verdict, num_ok, reason, rep.accept, rep))
     return all(r[4] for r in rows), rows
+
+
+def locate_crash(level, file, fn, seed=0):
+    """Run a candidate once per harness case, concretely, at the REAL harness shapes and real tile
+    limits (the proof's scaled-down tiles would report pmax=4 errors that do not exist on the
+    device). No reference, no proof: this only finds where and why the kernel stops.
+    Returns None if it runs on every case, else (case label, error kind, message) for the first
+    case that fails; kind is "invalid" (a hardware rule), "exception" (Python error, with the
+    kernel's own frames) or "unsupported" (an NKI feature the interpreter does not model)."""
+    import numpy as np
+
+    from nkiequiv.domains import ConcreteDomain
+    from nkiequiv.runner import run_kernel
+    from nkiequiv.shim.runtime import parse_profile
+
+    for case in LEVELS[level]["cases"]():
+        specs = case.numerics_specs or case.specs
+        rng = np.random.default_rng(seed)
+        inputs = {s.name: rng.standard_normal(tuple(s.shape)) for s in specs}
+        cand = KernelRef(os.path.join(LADDER_DIR, file), fn, kwargs=case.kwargs)
+        tr = run_kernel(cand, specs, ConcreteDomain("real"), parse_profile("full"), inputs,
+                        track_deps=False)
+        if not tr.ok:
+            return case.label, tr.error_kind, tr.error
+    return None
 
 
 def main(argv):
@@ -57,7 +83,7 @@ def main(argv):
             expect = "correct kernel" if should_accept else "wrong answer"
             print(f"  [{'ok' if ok else 'UNEXPECTED'}] {expect:14s} {fn:36s} {status}  ({time.time() - t0:.1f}s)")
             if verbose or not ok or not accepted:
-                for label, verdict, num_ok, reason, acc in rows:
+                for label, verdict, num_ok, reason, acc, _ in rows:
                     if verbose or not acc:
                         first = reason.splitlines()[0][:150]
                         print(f"        {label:24s} {verdict:15s} {first}")
@@ -72,7 +98,7 @@ def main(argv):
             print(f"  [{'ok' if ok else 'UNEXPECTED'}] blind spot     {fn:36s} "
                   f"{'accepted' if on_harness else 'rejected'} on the harness shapes, "
                   f"{'accepted' if on_extra else 'rejected'} on {extra[0].label}")
-            for label, verdict, num_ok, reason, acc in rows:
+            for label, verdict, num_ok, reason, acc, _ in rows:
                 if not acc:
                     print(f"        {label:24s} {verdict:15s} {reason.splitlines()[0][:150]}")
                     break
