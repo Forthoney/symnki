@@ -1,12 +1,9 @@
 """Check the shim's semantics against the real NKI CPU simulator.
 
-The real ``nki`` wheel only exists for CPython <= 3.13, so this runs in two steps:
+Needs the real nki package (the ``nki`` extra):
 
-  # 1. in an environment with the real nki package installed
-  python -I scripts/conformance.py record OUT_DIR
-
-  # 2. in the validator's environment
-  python scripts/conformance.py compare OUT_DIR
+  python scripts/conformance.py record OUT_DIR    # run every case through nki.simulate
+  python scripts/conformance.py compare OUT_DIR   # replay the inputs through the shim
 
 ``record`` runs every case through ``nki.simulate`` at full hardware tile sizes
 and saves inputs and outputs; ``compare`` replays the same inputs through the

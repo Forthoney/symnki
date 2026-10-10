@@ -20,6 +20,21 @@ assumption: exp(x) with a constant offset <= -1000 is treated as 0 (masking cons
 assumption: max() arguments that are constants <= -1000 are treated as -inf and dropped
 ```
 
+## Setup
+
+The NKI SDK ships wheels for CPython 3.11–3.13 only, so the project is pinned to 3.13
+(`.python-version`) and the validator runs in the same environment as the real `nki`
+package. The `nki` extra installs it from AWS's Neuron index (PyPI has an unrelated
+placeholder of the same name, which `pyproject.toml` rules out):
+
+```bash
+uv venv --python 3.13
+uv pip install -e ".[test,nki]"
+```
+
+While tracing a kernel the validator swaps its own `nki` module into `sys.modules` and
+restores the real one afterwards, so both can be used in one process.
+
 ## How it works
 
 ```
@@ -160,7 +175,7 @@ Profiles: `small` (pmax 4, 4×8 matmul tiles), `medium` (8, 8×16) and `full`
 ## Conformance with the real NKI simulator
 
 `scripts/conformance.py` runs the examples through the real `nki.simulate`
-(NKI 0.6.0, which needs Python ≤ 3.13) at full Trainium2 tile sizes. It then
+(NKI 0.6.0) at full Trainium2 tile sizes. It then
 replays the same inputs through the interpreter in hardware-precision mode.
 
 | kernels | agreement |
@@ -173,8 +188,8 @@ replays the same inputs through the interpreter in hardware-precision mode.
 Re-run it whenever NKI changes:
 
 ```bash
-python -I scripts/conformance.py record OUT   # in an env with the real nki package
-python scripts/conformance.py compare OUT     # in this env
+python scripts/conformance.py record OUT    # runs the real nki.simulate
+python scripts/conformance.py compare OUT   # replays the same inputs through the shim
 ```
 
 ## Examples
@@ -187,6 +202,42 @@ python scripts/conformance.py compare OUT     # in this env
 | `examples/elementwise.py` | relu via abs, clamp reorderings (Z3 path), SPMD `program_id` split |
 
 `pytest tests` runs all of them (about 1 s).
+
+## The nkibench ladder (trainium-agent-labs, project 2)
+
+`examples/hackathon/` checks every level of the hackathon's kernel ladder against the NumPy
+reference nkibench grades with (`refs.py`, a verbatim copy that the tests keep in sync). Each
+level has one correct kernel that must be accepted and plausible wrong answers that must be
+rejected:
+
+```bash
+python scripts/check_ladder.py        # all 8 levels, ~1 min (level 3 is proved at 128x64x512)
+python scripts/check_ladder.py 4 -v   # one level, every case and verdict
+```
+
+| level | correct kernel | wrong answers (all rejected) |
+|---|---|---|
+| 1 avgpool | `reference_level1.py` | divide by p not p², wrong window stride, max-pool |
+| 2 transpose | `reference_level2.py` | inverse permutation (right only on square shapes), plain copy, missed last row (uninitialized) |
+| 3 matmul, 1 tile | `reference_level3.py` | DMA straight from PSUM, `accumulate=True` on a fresh tile, half the contraction |
+| 4 tiled | `reference_level4.py` | skipped K tile, PSUM shared across n, wrong rhs block, swapped output block |
+| 5 hoisted | `solution_level5.py` | lhsT hoisted one loop too far |
+| 6 M/N blocked | `solution_level6.py` | lhsT block offset drops the block index |
+| 7 M/N/K blocked | `solution_level7.py` | accumulator never zeroed, K-block offset dropped |
+| 8 attention | `solution_level8.py` | no max subtraction (exact over the reals, overflows: caught by numerics), no 1/√d, probabilities not transposed |
+
+Levels 1–3 are proved at the exact harness shapes. Levels 4–8 are proved at the harness
+shapes scaled tile-for-tile and checked numerically at the real ones. Each level 5–7 solution
+also meets that level's HBM-traffic bar. Cross-checked against the real `nki.simulate` with
+nkibench's own checking code: every correct kernel passes all harness shapes, and every wrong
+one fails at least one, except `attention_no_max_subtraction`, which nkibench's numerical
+check accepts on its shapes.
+
+**A blind spot of the harness shapes.** `rhs_offset_drops_block_index` (level 6) drops the N
+block index from an offset. Every harness shape has a single N block, so on those shapes it
+*is* the reference: both the proof and nkibench accept it. A shape with N = 2048 exposes it.
+A proof covers only the shapes it is given, so the shapes need at least two blocks in every
+dimension a kernel blocks.
 
 ## Limitations and next steps
 

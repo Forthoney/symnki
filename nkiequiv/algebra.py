@@ -58,10 +58,40 @@ def _num(c) -> int | Fraction:
             return int(BIG) if c > 0 else -int(BIG)
         if math.isnan(c):
             raise ValueError("NaN literal in kernel")
-        return _num(Fraction(c))
+        return _num(_snap_rational(c))
     if hasattr(c, "item"):  # numpy scalar
         return _num(c.item())
     return _num(Fraction(c))
+
+
+# Float literals are rounded values of the constant the author meant: 1/9 is
+# written 0.1111111111111111 and 1/sqrt(128) is 0.08838834764831845. Two kernels
+# that compute the same constant differently (x/sqrt(d) vs x*(1/sqrt(d))) then
+# differ in the last bit. A literal within a few ulps of a rational with a small
+# denominator, or of the square root of one, is read as that exact value.
+_SNAP_DEN = 1 << 20
+_SNAP_REL = Fraction(1, 1 << 49)  # ~8 ulps of a float64
+
+
+def _snap_rational(f: float) -> Fraction:
+    exact = Fraction(f)
+    if exact.denominator == 1 or exact.denominator <= _SNAP_DEN:
+        return exact
+    q = exact.limit_denominator(_SNAP_DEN)
+    if q != 0 and abs(q - exact) <= abs(exact) * _SNAP_REL:
+        ASSUMPTIONS.add(f"float literal {f!r} read as exactly {q}")
+        return q
+    return exact
+
+
+def _snap_sqrt(f: float):
+    """(sign, rational r) with f ~= sign * sqrt(r), or None."""
+    exact = Fraction(f)
+    sq = exact * exact
+    q = sq.limit_denominator(_SNAP_DEN)
+    if q > 0 and abs(q - sq) <= sq * 2 * _SNAP_REL:
+        return (1 if f > 0 else -1), q
+    return None
 
 
 # --------------------------------------------------------------------------
@@ -229,6 +259,15 @@ ONE = Poly({(): 1})
 
 
 def const(c) -> Poly:
+    if isinstance(c, float) and math.isfinite(c):
+        r = _snap_rational(c)
+        if r.denominator > _SNAP_DEN:
+            hit = _snap_sqrt(c)
+            if hit is not None:
+                sign, q = hit
+                ASSUMPTIONS.add(f"float literal {c!r} read as exactly {'-' if sign < 0 else ''}sqrt({q})")
+                p = _const_power(q, Fraction(1, 2))
+                return neg(p) if sign < 0 else p
     c = _num(c)
     if c == 0:
         return ZERO
@@ -372,6 +411,12 @@ def _normalize_mono(factors: list) -> Poly | tuple:
             exp_arg = term if exp_arg is None else add(exp_arg, term)
         elif k == "ind":
             rest.append((a, 1) if e > 0 else (a, e))
+        elif k == "base" and a.args[0].is_const() and not 0 <= e < 1:
+            # sqrt(s)^e for a constant s: keep only the fractional part as an atom.
+            whole = math.floor(e)
+            expand.append((a.args[0], whole))
+            if e - whole != 0:
+                rest.append((a, _num(e - whole)))
         elif k == "base":
             if e >= 1:
                 whole = int(e)  # floor for positive

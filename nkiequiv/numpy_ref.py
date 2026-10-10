@@ -22,6 +22,7 @@ reshape, broadcasting, basic slicing, astype. Anything else raises
 
 from __future__ import annotations
 
+import contextlib
 import os
 from dataclasses import dataclass, field
 
@@ -261,7 +262,46 @@ _FUNCTIONS = {
     "expand_dims": lambda a, axis: a._wrap(np.expand_dims(a.v, axis)),
     "squeeze": lambda a, axis=None: a._wrap(np.squeeze(a.v, axis)),
     "square": lambda a: a._wrap(a.dom.unary("square", a.v)),
+    "ascontiguousarray": lambda a, dtype=None: a.astype(dtype) if dtype is not None else a.copy(),
+    "copy": lambda a, **k: a.copy(),
+    "swapaxes": lambda a, x, y: a._wrap(np.swapaxes(a.v, x, y)),
 }
+
+
+# A few NumPy functions are implemented in C without the __array_function__
+# hook, so they never reach TracedArray. While a reference is traced, its
+# module-level `np` is replaced by this proxy, which routes them here.
+_NO_DISPATCH = ("ascontiguousarray", "asarray", "asanyarray", "array", "copy")
+
+
+class _NumpyProxy:
+    def __init__(self, real):
+        self._real = real
+
+    def __getattr__(self, name):
+        attr = getattr(self._real, name)
+        if name in _NO_DISPATCH:
+            def routed(a, *args, **kwargs):
+                if isinstance(a, TracedArray):
+                    if name in ("ascontiguousarray", "asarray", "asanyarray", "array"):
+                        dtype = kwargs.get("dtype", args[0] if args else None)
+                        return a.astype(dtype) if dtype is not None else a.copy()
+                    return a.copy()
+                return attr(a, *args, **kwargs)
+            return routed
+        return attr
+
+
+@contextlib.contextmanager
+def _traced_numpy(fn):
+    g = fn.__globals__
+    swapped = {k: v for k, v in g.items() if v is np}
+    for k in swapped:
+        g[k] = _NumpyProxy(np)
+    try:
+        yield
+    finally:
+        g.update(swapped)
 
 
 # --------------------------------------------------------------------------
@@ -310,7 +350,7 @@ def run_numpy(ref: NumpyRef, specs, domain, input_values=None) -> TraceResult:
                 vals = domain.inputs(s.name, tuple(s.shape)) if domain.obj else np.asarray(
                     input_values[s.name], dtype=np.float64)
                 args.append(TracedArray(vals, FLOAT_DTYPES.get(s.dtype) or INT_DTYPES[s.dtype], domain))
-            with np.errstate(all="ignore"):
+            with np.errstate(all="ignore"), _traced_numpy(fn):
                 out = fn(*args, **ref.kwargs)
             outs = out if isinstance(out, (tuple, list)) else [out]
             for k, o in enumerate(outs):

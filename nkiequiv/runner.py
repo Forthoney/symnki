@@ -3,11 +3,12 @@
 from __future__ import annotations
 
 import contextlib
-import importlib.util
+import hashlib
 import itertools
 import os
 import sys
 import traceback
+import types
 from dataclasses import dataclass, field
 
 import numpy as np
@@ -67,14 +68,27 @@ _LOADED: dict = {}
 
 
 def load_kernel(ref: KernelRef):
-    key = (ref.path, os.path.getmtime(ref.path))
+    # Keyed on content, not mtime, and compiled from the source text: an agent rewrites the
+    # same file every round, and both a path/mtime cache and Python's own __pycache__ (which
+    # trusts mtime + size) would reuse a stale kernel after a same-second, same-length rewrite.
+    with open(ref.path, "rb") as f:
+        source = f.read()
+    digest = hashlib.sha256(source).hexdigest()[:16]
+    key = (ref.path, digest)
     mod = _LOADED.get(key)
     if mod is None:
-        modname = f"_nkiequiv_kernel_{abs(hash(key))}"
-        spec = importlib.util.spec_from_file_location(modname, ref.path)
-        mod = importlib.util.module_from_spec(spec)
-        with shim_modules():
-            spec.loader.exec_module(mod)
+        modname = f"_nkiequiv_kernel_{digest}"
+        mod = types.ModuleType(modname)
+        mod.__file__ = ref.path
+        code = compile(source, ref.path, "exec")
+        # Kernels may import helpers that sit next to them.
+        sys.path.insert(0, os.path.dirname(ref.path))
+        sys.modules[modname] = mod
+        try:
+            with shim_modules():
+                exec(code, mod.__dict__)
+        finally:
+            sys.path.remove(os.path.dirname(ref.path))
         _LOADED[key] = mod
     fn = getattr(mod, ref.func, None)
     if fn is None:

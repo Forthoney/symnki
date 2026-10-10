@@ -2,11 +2,15 @@
 name = "nkiequiv"
 version = "0.1.0"
 description = "Equivalence checker for AWS Neuron NKI kernels (symbolic execution + Z3)"
-requires-python = ">=3.11"
+# The NKI SDK ships wheels for CPython 3.11-3.13 only; stay inside that range so the
+# validator can run in the same environment as the real nki package.
+requires-python = ">=3.11,<3.14"
 dependencies = ["numpy", "ml_dtypes", "z3-solver"]
 
 [project.optional-dependencies]
 test = ["pytest"]
+# The real NKI SDK, for scripts/conformance.py and for running beside nki.simulate.
+nki = ["nki>=0.6"]
 
 [project.scripts]
 nkiequiv = "nkiequiv.cli:main"
@@ -17,3 +21,12 @@ build-backend = "setuptools.build_meta"
 
 [tool.setuptools]
 packages = ["nkiequiv", "nkiequiv.shim"]
+
+# nki comes from AWS's Neuron index only. PyPI has an unrelated placeholder named "nki".
+[tool.uv.sources]
+nki = { index = "neuron" }
+
+[[tool.uv.index]]
+name = "neuron"
+url = "https://pip.repos.neuron.amazonaws.com"
+explicit = true
