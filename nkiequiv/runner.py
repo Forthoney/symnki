@@ -47,11 +47,12 @@ class KernelRef:
 
 @contextlib.contextmanager
 def shim_modules():
-    names = ("nki", "nki.language", "nki.isa")
+    names = ("nki", "nki.language", "nki.isa", "nki.typing")
     saved = {n: sys.modules.get(n) for n in names}
     sys.modules["nki"] = shim
     sys.modules["nki.language"] = shim.language
     sys.modules["nki.isa"] = shim.isa
+    sys.modules["nki.typing"] = shim.typing
     try:
         yield
     finally:

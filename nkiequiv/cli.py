@@ -1,6 +1,7 @@
 """Command line: python -m nkiequiv check REF CAND [options]
 
-REF / CAND are 'path/to/kernels.py::function'.
+REF / CAND are 'path/to/kernels.py::function'. REF may also be a NumPy function:
+'numpy:path/to/refs.py::function'.
 
 Input shapes come from either repeated --arg flags or a --spec file:
 
@@ -21,6 +22,7 @@ import json
 import sys
 
 from .check import Options, check
+from .numpy_ref import NumpyRef
 from .runner import ArgSpec, KernelRef, shim_modules
 from .shim.runtime import parse_profile
 
@@ -115,7 +117,8 @@ def main(argv=None):
     def grid(text):
         return tuple(int(x) for x in text.split(",")) if text else (1,)
 
-    ref = KernelRef.parse(a.reference, kwargs=json.loads(a.ref_kwargs), grid=grid(a.ref_grid))
+    ref_cls = NumpyRef if a.reference.startswith("numpy:") else KernelRef
+    ref = ref_cls.parse(a.reference, kwargs=json.loads(a.ref_kwargs), grid=grid(a.ref_grid))
     cand = KernelRef.parse(a.candidate, kwargs=json.loads(a.cand_kwargs), grid=grid(a.cand_grid))
     opts = Options(profile=a.profile, numerics=not a.no_numerics, target=a.target,
                    z3_budget=a.z3_budget, neg_inf_threshold=a.neg_inf_threshold,

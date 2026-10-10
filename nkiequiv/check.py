@@ -25,6 +25,7 @@ import numpy as np
 from . import algebra as A
 from . import z3check
 from .domains import ConcreteDomain, SymbolicDomain, round_to_dtype
+from .numpy_ref import NumpyRef, run_numpy
 from .runner import ArgSpec, KernelRef, TraceResult, run_kernel, undef_sources
 from .shim.runtime import TileSize, parse_profile
 
@@ -77,6 +78,19 @@ class Report:
 
 
 # --------------------------------------------------------------------------
+
+
+def _run(ref, specs, domain, prof, inputs=None, opts=None, track_deps=False) -> TraceResult:
+    """Execute a reference (NKI kernel or NumPy function) or a candidate kernel."""
+    if isinstance(ref, NumpyRef):
+        return run_numpy(ref, specs, domain, inputs)
+    return run_kernel(ref, specs, domain, prof, inputs, opts.target, track_deps=track_deps)
+
+
+# Relative error a correct kernel may show regardless of the reference's own
+# error (used for NumPy references, which typically compute in float32/64).
+DTYPE_TOLERANCE = {"float32": 1e-5, "tfloat32": 2e-3, "float16": 2e-3, "bfloat16": 1.6e-2,
+                   "float8_e4m3": 0.13, "float8_e4m3fn": 0.13, "float8_e5m2": 0.25}
 
 
 def _fmt_idx(idx):
@@ -140,8 +154,8 @@ def _close(a, b, rtol=1e-7, atol=1e-9):
 def _search_counterexample(ref, cand, specs, prof, opts, mismatch_mask):
     dom = ConcreteDomain("real")
     for label, inputs in _input_sets(specs, opts.seeds):
-        rr = run_kernel(ref, specs, dom, prof, inputs, opts.target, track_deps=False)
-        cr = run_kernel(cand, specs, dom, prof, inputs, opts.target, track_deps=False)
+        rr = _run(ref, specs, dom, prof, inputs, opts)
+        cr = _run(cand, specs, dom, prof, inputs, opts)
         if not (rr.ok and cr.ok):
             continue
         for k, (ra, ca) in enumerate(zip(rr.outputs, cr.outputs)):
@@ -173,9 +187,9 @@ def _numerics(ref, cand, specs, prof: TileSize, opts):
     for label, inputs in _input_sets(specs, 1):
         # Inputs are representable in their dtype.
         inputs = {s.name: round_to_dtype(inputs[s.name], s.dtype) for s in specs}
-        truth = run_kernel(ref, specs, ConcreteDomain("real"), prof, inputs, opts.target, track_deps=False)
-        rh = run_kernel(ref, specs, ConcreteDomain("hw"), prof, inputs, opts.target, track_deps=False)
-        ch = run_kernel(cand, specs, ConcreteDomain("hw"), prof, inputs, opts.target, track_deps=False)
+        truth = _run(ref, specs, ConcreteDomain("real"), prof, inputs, opts)
+        rh = _run(ref, specs, ConcreteDomain("hw"), prof, inputs, opts)
+        ch = _run(cand, specs, ConcreteDomain("hw"), prof, inputs, opts)
         if not (truth.ok and rh.ok and ch.ok):
             return {"pass": False, "error": (truth.error or rh.error or ch.error)}
         ref_err = cand_err = 0.0
@@ -191,6 +205,9 @@ def _numerics(ref, cand, specs, prof: TileSize, opts):
         worst["ref_err"] = max(worst["ref_err"], ref_err)
         worst["cand_err"] = max(worst["cand_err"], cand_err)
     limit = opts.numerics_rtol_factor * worst["ref_err"] + opts.numerics_atol
+    if isinstance(ref, NumpyRef):
+        out_dtypes = [m[2] for m in ch.out_meta]
+        limit = max(limit, max(DTYPE_TOLERANCE.get(d, 1e-5) for d in out_dtypes))
     return {
         "pass": worst["cand_err"] <= limit,
         "ref_max_rel_err": worst["ref_err"],
@@ -200,7 +217,7 @@ def _numerics(ref, cand, specs, prof: TileSize, opts):
     }
 
 
-def check(ref: KernelRef, cand: KernelRef, specs: list[ArgSpec], opts: Options | None = None) -> Report:
+def check(ref: KernelRef | NumpyRef, cand: KernelRef, specs: list[ArgSpec], opts: Options | None = None) -> Report:
     opts = opts or Options()
     t0 = time.time()
     A.reset_tables()
@@ -209,7 +226,7 @@ def check(ref: KernelRef, cand: KernelRef, specs: list[ArgSpec], opts: Options |
     rep = Report(verdict="UNKNOWN", reference=ref.label(), candidate=cand.label(), profile=opts.profile)
 
     sym = SymbolicDomain()
-    rt = run_kernel(ref, specs, sym, prof, target=opts.target, track_deps=opts.strict_affine)
+    rt = _run(ref, specs, sym, prof, opts=opts, track_deps=opts.strict_affine)
     t_ref = time.time()
     if not rt.ok:
         rep.verdict, rep.reason = "REFERENCE_ERROR", rt.error

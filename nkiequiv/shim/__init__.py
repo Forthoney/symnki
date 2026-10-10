@@ -9,7 +9,7 @@ from __future__ import annotations
 
 import functools
 
-from . import isa, language
+from . import isa, language, typing
 from .runtime import KernelError, NkiTensor
 
 
@@ -48,4 +48,4 @@ def baremetal(fn=None, **kwargs):
 
 benchmark = profile = baremetal
 
-__all__ = ["jit", "simulate", "language", "isa", "Kernel", "KernelError", "NkiTensor"]
+__all__ = ["jit", "simulate", "language", "isa", "typing", "Kernel", "KernelError", "NkiTensor"]

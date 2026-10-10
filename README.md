@@ -95,6 +95,31 @@ nkiequiv check ref.py::k cand.py::k --spec spec.py --cand-kwargs '{"TILES_IN_BLO
     --cand-grid 2 --json
 ```
 
+### NumPy functions as the reference
+
+The reference can be a plain NumPy function instead of an NKI kernel: prefix it with `numpy:`.
+
+```
+$ nkiequiv check numpy:examples/numpy_refs.py::ref_matmul \
+      examples/level4_matmul.py::nki_matmul_tiled_ --spec examples/numpy_refs.py
+verdict: EQUIVALENT  (accept)
+  all 128 output elements equal over the reals at profile 'small'
+numerics: pass  cand rel err 0.00323, ref rel err 0.00323, limit 0.016
+```
+
+The function runs unmodified on a traced array type (`nkiequiv/numpy_ref.py`)
+that intercepts NumPy's ufunc and array-function dispatch.
+
+- **Casts.** `astype` to a float dtype keeps the value over the reals; only the
+  recorded dtype changes, and output dtypes must match the kernel's.
+- **Numerics.** The function runs exactly as written on arrays of the declared
+  input dtypes. The tolerance is the larger of 4× the reference's own error and
+  a per-output-dtype floor (float32 1e-5, bf16 1.6e-2, ...).
+- **Supported subset.** Arithmetic and comparisons, ufuncs, `where`, reductions
+  (`sum`/`mean`/`max`/`min`/`prod` with `axis`/`keepdims`), `@`/`matmul`/`dot`,
+  transpose/reshape/broadcasting/slicing, and `astype`. Anything else (e.g.
+  `np.sort`, boolean-mask indexing, data-dependent `if`) is reported by name.
+
 A spec file defines `args(ts)` and returns `[(name, shape, dtype), ...]`. Here
 `ts` is the hardware profile (`ts.pmax`, `ts.gemm_moving_fmax`, ...). The example
 files carry their own `args`.
