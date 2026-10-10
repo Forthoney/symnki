@@ -1,0 +1,19 @@
+[project]
+name = "nkiequiv"
+version = "0.1.0"
+description = "Equivalence checker for AWS Neuron NKI kernels (symbolic execution + Z3)"
+requires-python = ">=3.11"
+dependencies = ["numpy", "ml_dtypes", "z3-solver"]
+
+[project.optional-dependencies]
+test = ["pytest"]
+
+[project.scripts]
+nkiequiv = "nkiequiv.cli:main"
+
+[build-system]
+requires = ["setuptools>=61"]
+build-backend = "setuptools.build_meta"
+
+[tool.setuptools]
+packages = ["nkiequiv", "nkiequiv.shim"]
