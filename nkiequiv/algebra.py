@@ -114,12 +114,14 @@ class Atom:
       fn     (name, tuple[Poly])      uninterpreted function application
     """
 
-    __slots__ = ("kind", "args", "id", "has_undef", "__weakref__")
+    __slots__ = ("kind", "args", "id", "has_undef", "plain", "__weakref__")
 
     def __init__(self, kind, args, ident):
         self.kind = kind
         self.args = args
         self.id = ident
+        # Multiplying plain atoms never triggers normalization in _mono_mul (see dot()).
+        self.plain = kind not in ("exp", "base", "ind")
         self.has_undef = kind == "undef" or any(
             p.has_undef for p in _atom_polys(kind, args)
         )
@@ -173,12 +175,15 @@ Mono = tuple
 
 
 class Poly:
-    __slots__ = ("terms", "_hash", "_undef")
+    __slots__ = ("terms", "_hash", "_undef", "plain")
 
     def __init__(self, terms: dict):
         self.terms = terms
         self._hash = None
         self._undef = None
+        # (factor, coef) when the Poly is coef * atom^e for one plain atom, else None.
+        # Only a shortcut for dot(); Polys are never mutated after construction.
+        self.plain = None
 
     # -- identity --------------------------------------------------------
     def __hash__(self):
@@ -283,7 +288,10 @@ def lift(x) -> Poly:
 
 
 def _mono_poly(mono, coef=1) -> Poly:
-    return Poly({mono: coef})
+    p = Poly({mono: coef})
+    if len(mono) == 1 and mono[0][0].plain:
+        p.plain = (mono[0], coef)
+    return p
 
 
 def var(name: str, index: tuple) -> Poly:
@@ -294,9 +302,14 @@ _undef_serial = 0
 
 
 def undef(name: str, index: tuple) -> Poly:
-    global _undef_serial
+    # Each uninitialized element is a distinct unknown, so it is never interned: the serial
+    # already makes every undef atom unique, and skipping the table saves a hash and an insert
+    # per element of every allocated tile.
+    global _undef_serial, _next_id
     _undef_serial += 1
-    return _mono_poly(((_atom("undef", (name, tuple(index), _undef_serial)), 1),))
+    a = Atom("undef", (name, tuple(index), _undef_serial), _next_id)
+    _next_id += 1
+    return _mono_poly(((a, 1),))
 
 
 def add(a: Poly, b: Poly) -> Poly:
@@ -456,38 +469,70 @@ def mul(a: Poly, b: Poly) -> Poly:
         return scale(b, a.const_value())
     if b.is_const():
         return scale(a, b.const_value())
-    t: dict = {}
-    extra = []
-    for m1, c1 in a.terms.items():
-        for m2, c2 in b.terms.items():
-            r = _mono_mul(m1, m2)
-            c = c1 * c2
-            if isinstance(r, tuple):
-                t[r] = t.get(r, 0) + c
-            else:
-                extra.append(scale(r, c))
-    p = Poly({m: _num(c) for m, c in t.items() if c != 0})
-    for e in extra:
-        p = add(p, e)
-    return p
+    return dot((a,), (b,))
 
 
 def dot(xs: Iterable[Poly], ys: Iterable[Poly]) -> Poly:
-    """sum_i xs[i] * ys[i] without building intermediate Polys."""
+    """sum_i xs[i] * ys[i] without building intermediate Polys.
+
+    This loop is where symbolic matmuls spend their time, so the common case is inlined:
+    two single-factor monomials of plain atoms (input variables and the like). For those,
+    _mono_mul does no normalization -- it merges two one-element lists by atom id -- and the
+    inline branch computes exactly the same tuple. Everything else goes through _mono_mul.
+    tests/test_algebra.py checks the two paths agree.
+    """
     t: dict = {}
+    get = t.get
     extra = []
     for a, b in zip(xs, ys):
-        if not a.terms or not b.terms:
+        pa = a.plain
+        pb = b.plain
+        if pa is not None and pb is not None:
+            # Same computation as the single-factor branch below, without unpacking dicts.
+            f1, c1 = pa
+            f2, c2 = pb
+            i1 = f1[0].id
+            i2 = f2[0].id
+            if i1 < i2:
+                r = (f1, f2)
+            elif i1 > i2:
+                r = (f2, f1)
+            else:
+                e = f1[1] + f2[1]
+                if isinstance(e, Fraction):
+                    e = _num(e)
+                r = ((f1[0], e),) if e != 0 else ()
+            t[r] = get(r, 0) + c1 * c2
             continue
-        for m1, c1 in a.terms.items():
-            for m2, c2 in b.terms.items():
+        at = a.terms
+        bt = b.terms
+        if not at or not bt:
+            continue
+        for m1, c1 in at.items():
+            f1 = m1[0] if len(m1) == 1 and m1[0][0].plain else None
+            for m2, c2 in bt.items():
+                if f1 is not None and len(m2) == 1 and m2[0][0].plain:
+                    f2 = m2[0]
+                    i1 = f1[0].id
+                    i2 = f2[0].id
+                    if i1 < i2:
+                        r = (f1, f2)
+                    elif i1 > i2:
+                        r = (f2, f1)
+                    else:
+                        e = f1[1] + f2[1]
+                        if isinstance(e, Fraction):
+                            e = _num(e)
+                        r = ((f1[0], e),) if e != 0 else ()
+                    t[r] = get(r, 0) + c1 * c2
+                    continue
                 r = _mono_mul(m1, m2)
                 c = c1 * c2
                 if isinstance(r, tuple):
-                    t[r] = t.get(r, 0) + c
+                    t[r] = get(r, 0) + c
                 else:
                     extra.append(scale(r, c))
-    p = Poly({m: _num(c) for m, c in t.items() if c != 0})
+    p = Poly({m: (c if type(c) is int else _num(c)) for m, c in t.items() if c != 0})
     for e in extra:
         p = add(p, e)
     return p

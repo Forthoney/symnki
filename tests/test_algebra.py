@@ -88,3 +88,54 @@ def test_z3_unknown_with_uninterpreted_functions_is_not_refuted():
     a = xs(1)[0]
     status, _ = z3check.prove_equal(A.fn("gelu", a), A.fn("erf", a))
     assert status in ("unknown", "refuted") and status != "proved"
+
+
+def _reference_dot(xs, ys):
+    """The generic loop dot() used before its plain-atom fast path (kept verbatim)."""
+    t, extra = {}, []
+    for a, b in zip(xs, ys):
+        if not a.terms or not b.terms:
+            continue
+        for m1, c1 in a.terms.items():
+            for m2, c2 in b.terms.items():
+                r = A._mono_mul(m1, m2)
+                c = c1 * c2
+                if isinstance(r, tuple):
+                    t[r] = t.get(r, 0) + c
+                else:
+                    extra.append(A.scale(r, c))
+    p = A.Poly({m: A._num(c) for m, c in t.items() if c != 0})
+    for e in extra:
+        p = A.add(p, e)
+    return p
+
+
+def test_dot_fast_path_matches_generic_path():
+    import random
+
+    rnd = random.Random(0)
+    v = xs(4)
+    atoms = v + [
+        A.exp(v[0] - v[1]),
+        A.power(v[0] * v[0] + 1, Fraction(1, 2)),
+        A.power(v[1] * v[1] + v[2], -1),
+        A.compare("gt", v[0], v[3]),
+        A.maximum([v[1], v[2]]),
+        A.power(v[2], -1),
+        A.const(Fraction(3, 7)),
+    ]
+
+    def rand_poly():
+        p = A.ZERO
+        for _ in range(rnd.randint(0, 3)):
+            term = A.const(rnd.choice([1, -1, 2, Fraction(1, 3), Fraction(-5, 2)]))
+            for _ in range(rnd.randint(0, 3)):
+                term = _reference_dot([term], [rnd.choice(atoms)])
+            p = A.add(p, term)
+        return p
+
+    for _ in range(400):
+        n = rnd.randint(1, 5)
+        a = [rand_poly() for _ in range(n)]
+        b = [rand_poly() for _ in range(n)]
+        assert A.dot(a, b) == _reference_dot(a, b)
