@@ -321,7 +321,14 @@ class NkiTensor:
         c = ctx()
         if c.track_deps and c.loop_stack:
             _check_deps(self, c, "read", accumulate)
-        return self._storage.vals[self._idx]
+        vals = self._storage.vals[self._idx]
+        if not isinstance(vals, np.ndarray):
+            # A 0-d view (e.g. x[p, i]) of an object array indexes to the bare element (a Poly),
+            # not a 0-d array; callers rely on .size and .reshape.
+            holder = np.empty((), dtype=self._storage.vals.dtype)
+            holder[()] = vals
+            vals = holder
+        return vals
 
     def write(self, values, accumulate=False):
         c = ctx()
